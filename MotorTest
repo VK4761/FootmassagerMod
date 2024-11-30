@@ -1,0 +1,437 @@
+/**
+ * @file ESP32_Touch_MQTT_HomeAssistant.ino
+ * @brief ESP32 code integrating touch inputs with Home Assistant via MQTT.
+ * 
+ * This sketch allows control of a motor and relay via touch inputs and Home Assistant.
+ * Touch inputs have priority, and the latest input always takes precedence.
+ * The device sends state updates to Home Assistant regardless of the input source.
+ */
+
+#include <Arduino.h>
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// ============================
+// 📶 Wi-Fi Configuration
+// ============================
+const char* ssid     = "ACT102637353215_5g";          ///< Your Wi-Fi SSID
+const char* password = "30081177"; ///< Your Wi-Fi Password
+
+// ============================
+// 🌐 MQTT Configuration
+// ============================
+const char* mqtt_server   = "192.168.0.114"; ///< IP address of your MQTT broker (Home Assistant server)
+const int   mqtt_port     = 1883;            ///< Default MQTT port
+const char* mqtt_user     = "vk";///< MQTT username
+const char* mqtt_password = "password"; ///< MQTT password
+
+// MQTT Topics
+const char* relay_command_topic = "home/relay/control";  ///< Topic to control the relay
+const char* relay_state_topic   = "home/relay/state";    ///< Topic to publish relay state
+const char* motor_command_topic = "home/motor/control";  ///< Topic to control the motor
+const char* motor_state_topic   = "home/motor/state";    ///< Topic to publish motor state
+const char* device_state_topic  = "home/device/state";   ///< Topic to publish device ON/OFF state
+
+// ============================
+// 🛠️ Pin Definitions
+// ============================
+// Relay and Motor Pins
+#define RELAY_PIN          19  ///< Relay control pin (IN4)
+#define MOTOR_FORWARD_PIN  25  ///< Motor forward control pin
+#define MOTOR_REVERSE_PIN  26  ///< Motor reverse control pin
+#define MOTOR_ENABLE_PIN   27  ///< Motor enable pin (PWM)
+
+// Touch Sensor Pins
+#define TOUCH1_PIN         T2  ///< Touch 1 pin (GPIO2)
+#define TOUCH2_PIN         T4  ///< Touch 2 pin (GPIO4)
+
+// ============================
+// ⚙️ Global Variables
+// ============================
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+bool deviceOn = false;             ///< Device ON/OFF state
+bool motorDirectionForward = true; ///< Motor direction
+uint8_t motorSpeed = 0;            ///< Motor speed (0-255)
+unsigned long touch1LastTouched = 0; ///< Last touch time for Touch 1
+unsigned long touch2LastTouched = 0; ///< Last touch time for Touch 2
+bool touch1Debounce = false;
+bool touch2Debounce = false;
+
+// Touch thresholds (calibrate as needed)
+const uint16_t TOUCH1_THRESHOLD = 50; ///< Threshold for Touch 1
+const uint16_t TOUCH2_THRESHOLD = 50; ///< Threshold for Touch 2
+
+// Debounce settings
+const unsigned long DEBOUNCE_DELAY = 200; ///< Debounce delay in milliseconds
+
+// Long press duration
+const unsigned long LONG_PRESS_DURATION = 2000; ///< Long press duration in milliseconds (2 seconds)
+
+// ============================
+// 🛠️ Function Prototypes
+// ============================
+void setupWiFi();
+void reconnectMQTT();
+void mqttCallback(char* topic, byte* payload, unsigned int length);
+void setMotorSpeed(uint8_t speed, bool forward);
+void stopMotor();
+void toggleRelay(bool state);
+void publishRelayState();
+void publishMotorState();
+void publishDeviceState();
+void handleTouchInputs();
+void handleTouch1();
+void handleTouch2();
+bool isTouchPressed(uint8_t touchPin, uint16_t threshold);
+void initializeMotorPWM();
+
+// ============================
+// 🔧 Setup Function
+// ============================
+void setup() {
+  // Initialize Serial Communication
+  Serial.begin(115200);
+  delay(100);
+
+  // Initialize GPIO Pins
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH); // Relay inactive (assuming active LOW)
+
+  pinMode(MOTOR_FORWARD_PIN, OUTPUT);
+  pinMode(MOTOR_REVERSE_PIN, OUTPUT);
+  pinMode(MOTOR_ENABLE_PIN, OUTPUT);
+  stopMotor();
+
+  // Initialize Touch Sensors (No pinMode needed)
+
+  // Initialize Motor PWM
+  initializeMotorPWM();
+
+  // Connect to Wi-Fi
+  setupWiFi();
+
+  // Initialize MQTT
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(mqttCallback);
+
+  Serial.println("Setup complete. Awaiting commands...");
+}
+
+// ============================
+// 🔄 Main Loop
+// ============================
+void loop() {
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+  client.loop();
+
+  handleTouchInputs();
+}
+
+// ============================
+// 📡 Wi-Fi Connection Setup
+// ============================
+void setupWiFi() {
+  Serial.print("Connecting to Wi-Fi");
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nWi-Fi connected.");
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+// ============================
+// 🔄 MQTT Reconnection
+// ============================
+void reconnectMQTT() {
+  // Loop until reconnected
+  while (!client.connected()) {
+    Serial.print("Attempting MQTT connection...");
+
+    // Attempt to connect
+    if (client.connect("ESP32Client", mqtt_user, mqtt_password)) {
+      Serial.println("Connected to MQTT broker.");
+
+      // Subscribe to control topics
+      client.subscribe(relay_command_topic);
+      client.subscribe(motor_command_topic);
+
+      // Publish initial states
+      publishRelayState();
+      publishMotorState();
+      publishDeviceState();
+    } else {
+      Serial.print("Failed, rc=");
+      Serial.print(client.state());
+      Serial.println(" Trying again in 5 seconds...");
+      delay(5000);
+    }
+  }
+}
+
+// ============================
+// 📬 MQTT Callback Function
+// ============================
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  if (!deviceOn) {
+    // Device is OFF, ignore commands
+    Serial.println("Device is OFF. Ignoring MQTT commands.");
+    return;
+  }
+
+  String message;
+  for (unsigned int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  message.trim();
+
+  Serial.print("Received message on topic [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(message);
+
+  // Handle Relay Commands
+  if (String(topic) == relay_command_topic) {
+    if (message.equalsIgnoreCase("ON")) {
+      toggleRelay(true);
+    }
+    else if (message.equalsIgnoreCase("OFF")) {
+      toggleRelay(false);
+    }
+    else if (message.equalsIgnoreCase("TOGGLE")) {
+      toggleRelay(digitalRead(RELAY_PIN) == HIGH);
+    }
+  }
+
+  // Handle Motor Commands
+  else if (String(topic) == motor_command_topic) {
+    if (message.startsWith("FORWARD")) {
+      int speed = message.substring(7).toInt(); // Expecting format "FORWARD128"
+      motorDirectionForward = true;
+      setMotorSpeed(speed, motorDirectionForward);
+    }
+    else if (message.startsWith("REVERSE")) {
+      int speed = message.substring(7).toInt(); // Expecting format "REVERSE128"
+      motorDirectionForward = false;
+      setMotorSpeed(speed, motorDirectionForward);
+    }
+    else if (message.equalsIgnoreCase("STOP")) {
+      stopMotor();
+    }
+  }
+
+  // Latest input takes precedence, publish updated states
+  publishRelayState();
+  publishMotorState();
+}
+
+// ============================
+// 🛠️ Touch Input Handling
+// ============================
+/**
+ * @brief Handles touch inputs for both Touch 1 and Touch 2.
+ */
+void handleTouchInputs() {
+  handleTouch1();
+  handleTouch2();
+}
+
+/**
+ * @brief Handles Touch 1 input (Master On/Off).
+ */
+void handleTouch1() {
+  static unsigned long touchStartTime = 0;
+
+  if (isTouchPressed(TOUCH1_PIN, TOUCH1_THRESHOLD)) {
+    if (!touch1Debounce) {
+      touchStartTime = millis();
+      touch1Debounce = true;
+    }
+
+    if (millis() - touchStartTime > DEBOUNCE_DELAY) {
+      // Toggle device state
+      deviceOn = !deviceOn;
+      Serial.println(deviceOn ? "Device turned ON via Touch 1" : "Device turned OFF via Touch 1");
+
+      if (!deviceOn) {
+        // Reset all states
+        stopMotor();
+        toggleRelay(false);
+      }
+
+      publishDeviceState();
+      publishRelayState();
+      publishMotorState();
+
+      // Wait until touch is released
+      while (isTouchPressed(TOUCH1_PIN, TOUCH1_THRESHOLD)) {
+        delay(50);
+      }
+
+      touch1Debounce = false;
+    }
+  } else {
+    touch1Debounce = false;
+  }
+}
+
+/**
+ * @brief Handles Touch 2 input (Motor Control).
+ */
+void handleTouch2() {
+  static unsigned long touchStartTime = 0;
+  static bool longPressHandled = false;
+
+  if (!deviceOn) {
+    // Device is OFF, ignore touch inputs
+    return;
+  }
+
+  if (isTouchPressed(TOUCH2_PIN, TOUCH2_THRESHOLD)) {
+    if (!touch2Debounce) {
+      touchStartTime = millis();
+      touch2Debounce = true;
+      longPressHandled = false;
+    }
+
+    unsigned long touchDuration = millis() - touchStartTime;
+
+    if (touchDuration >= LONG_PRESS_DURATION && !longPressHandled) {
+      // Long press detected, reverse motor direction
+      motorDirectionForward = !motorDirectionForward;
+      Serial.println(motorDirectionForward ? "Motor direction set to FORWARD via Touch 2" : "Motor direction set to REVERSE via Touch 2");
+      setMotorSpeed(motorSpeed, motorDirectionForward);
+      publishMotorState();
+      longPressHandled = true;
+    }
+  } else if (touch2Debounce) {
+    unsigned long touchDuration = millis() - touchStartTime;
+
+    if (touchDuration < LONG_PRESS_DURATION) {
+      // Short press detected, cycle motor speed
+      if (motorSpeed == 64) {
+        motorSpeed = 128; // 50%
+      } else if (motorSpeed == 128) {
+        motorSpeed = 192; // 75%
+      } else {
+        motorSpeed = 64;  // 25%
+      }
+      Serial.printf("Motor speed set to %d%% via Touch 2\n", (motorSpeed * 100) / 255);
+      setMotorSpeed(motorSpeed, motorDirectionForward);
+      publishMotorState();
+    }
+
+    touch2Debounce = false;
+  }
+}
+
+/**
+ * @brief Checks if a touch sensor is pressed.
+ * 
+ * @param touchPin The touch sensor pin.
+ * @param threshold The touch threshold.
+ * @return true if pressed, false otherwise.
+ */
+bool isTouchPressed(uint8_t touchPin, uint16_t threshold) {
+  uint16_t touchValue = touchRead(touchPin);
+  // Uncomment the following line to debug touch values
+  // Serial.printf("Touch %d value: %d\n", touchPin, touchValue);
+  return touchValue < threshold;
+}
+
+// ============================
+// 🛠️ Motor Control Functions
+// ============================
+/**
+ * @brief Initializes the PWM for motor control.
+ */
+void initializeMotorPWM() {
+  ledcSetup(0, 5000, 8); // Channel 0, 5 kHz, 8-bit resolution
+  ledcAttachPin(MOTOR_ENABLE_PIN, 0);
+}
+
+/**
+ * @brief Sets the motor speed and direction.
+ * 
+ * @param speed PWM value (0-255)
+ * @param forward Direction: true for forward, false for reverse
+ */
+void setMotorSpeed(uint8_t speed, bool forward) {
+  if (speed > 255) speed = 255;
+
+  digitalWrite(MOTOR_FORWARD_PIN, forward ? HIGH : LOW);
+  digitalWrite(MOTOR_REVERSE_PIN, forward ? LOW : HIGH);
+
+  motorSpeed = speed;
+  ledcWrite(0, motorSpeed);
+
+  Serial.printf("Motor set to %s at speed %d\n", forward ? "FORWARD" : "REVERSE", motorSpeed);
+}
+
+/**
+ * @brief Stops the motor.
+ */
+void stopMotor() {
+  digitalWrite(MOTOR_FORWARD_PIN, LOW);
+  digitalWrite(MOTOR_REVERSE_PIN, LOW);
+  motorSpeed = 0;
+  ledcWrite(0, 0);
+  Serial.println("Motor stopped");
+}
+
+// ============================
+// 🛠️ Relay Control Function
+// ============================
+/**
+ * @brief Toggles the relay state.
+ * 
+ * @param state true to turn ON, false to turn OFF
+ */
+void toggleRelay(bool state) {
+  digitalWrite(RELAY_PIN, state ? LOW : HIGH); // Active LOW
+  Serial.println(state ? "Relay turned ON" : "Relay turned OFF");
+}
+
+// ============================
+// 📤 State Publishing Functions
+// ============================
+/**
+ * @brief Publishes the current relay state to MQTT.
+ */
+void publishRelayState() {
+  String state = (digitalRead(RELAY_PIN) == LOW) ? "ON" : "OFF";
+  client.publish(relay_state_topic, state.c_str(), true); // Retain the state
+  Serial.println("Published Relay State: " + state);
+}
+
+/**
+ * @brief Publishes the current motor state to MQTT.
+ */
+void publishMotorState() {
+  String direction = motorDirectionForward ? "FORWARD" : "REVERSE";
+  String state;
+  if (motorSpeed == 0) {
+    state = "STOPPED";
+  } else {
+    state = direction + String(motorSpeed);
+  }
+  client.publish(motor_state_topic, state.c_str(), true); // Retain the state
+  Serial.println("Published Motor State: " + state);
+}
+
+/**
+ * @brief Publishes the device ON/OFF state to MQTT.
+ */
+void publishDeviceState() {
+  String state = deviceOn ? "ON" : "OFF";
+  client.publish(device_state_topic, state.c_str(), true); // Retain the state
+  Serial.println("Published Device State: " + state);
+}
