@@ -10,20 +10,21 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <driver/ledc.h>  // Ensure this is compatible with your custom LEDC library
 
 // ============================
 // 📶 Wi-Fi Configuration
 // ============================
-const char* ssid     = "ACT102637353215_5g";          ///< Your Wi-Fi SSID
-const char* password = "30081177"; ///< Your Wi-Fi Password
+const char* ssid     = "your_SSID";          ///< Your Wi-Fi SSID
+const char* password = "your_WIFI_PASSWORD"; ///< Your Wi-Fi Password
 
 // ============================
 // 🌐 MQTT Configuration
 // ============================
 const char* mqtt_server   = "192.168.0.114"; ///< IP address of your MQTT broker (Home Assistant server)
 const int   mqtt_port     = 1883;            ///< Default MQTT port
-const char* mqtt_user     = "vk";///< MQTT username
-const char* mqtt_password = "password"; ///< MQTT password
+const char* mqtt_user     = "vk";            ///< MQTT username
+const char* mqtt_password = "Samsung989!@";  ///< MQTT password
 
 // MQTT Topics
 const char* relay_command_topic = "home/relay/control";  ///< Topic to control the relay
@@ -69,6 +70,11 @@ const unsigned long DEBOUNCE_DELAY = 200; ///< Debounce delay in milliseconds
 // Long press duration
 const unsigned long LONG_PRESS_DURATION = 2000; ///< Long press duration in milliseconds (2 seconds)
 
+// PWM Configuration
+const int PWM_CHANNEL = 0;          ///< PWM channel (ensure this matches your library's channel numbering)
+const int PWM_FREQ = 5000;          ///< PWM frequency in Hz
+const int PWM_RESOLUTION = 8;       ///< PWM resolution in bits (8 bits = 0-255)
+
 // ============================
 // 🛠️ Function Prototypes
 // ============================
@@ -101,10 +107,11 @@ void setup() {
 
   pinMode(MOTOR_FORWARD_PIN, OUTPUT);
   pinMode(MOTOR_REVERSE_PIN, OUTPUT);
-  pinMode(MOTOR_ENABLE_PIN, OUTPUT);
+  // No need to set MOTOR_ENABLE_PIN as OUTPUT when using ledc functions
+
   stopMotor();
 
-  // Initialize Touch Sensors (No pinMode needed)
+  // Initialize Touch Sensors (No pinMode needed for touch pins)
 
   // Initialize Motor PWM
   initializeMotorPWM();
@@ -236,17 +243,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 // ============================
 // 🛠️ Touch Input Handling
 // ============================
-/**
- * @brief Handles touch inputs for both Touch 1 and Touch 2.
- */
 void handleTouchInputs() {
   handleTouch1();
   handleTouch2();
 }
 
-/**
- * @brief Handles Touch 1 input (Master On/Off).
- */
 void handleTouch1() {
   static unsigned long touchStartTime = 0;
 
@@ -283,9 +284,6 @@ void handleTouch1() {
   }
 }
 
-/**
- * @brief Handles Touch 2 input (Motor Control).
- */
 void handleTouch2() {
   static unsigned long touchStartTime = 0;
   static bool longPressHandled = false;
@@ -317,12 +315,12 @@ void handleTouch2() {
 
     if (touchDuration < LONG_PRESS_DURATION) {
       // Short press detected, cycle motor speed
-      if (motorSpeed == 64) {
-        motorSpeed = 128; // 50%
-      } else if (motorSpeed == 128) {
-        motorSpeed = 192; // 75%
+      if (motorSpeed == 64) {      // 25% of 255 ≈ 64
+        motorSpeed = 128;           // 50% of 255 ≈ 128
+      } else if (motorSpeed == 128) { // 50%
+        motorSpeed = 192;           // 75% of 255 ≈ 192
       } else {
-        motorSpeed = 64;  // 25%
+        motorSpeed = 64;            // 25%
       }
       Serial.printf("Motor speed set to %d%% via Touch 2\n", (motorSpeed * 100) / 255);
       setMotorSpeed(motorSpeed, motorDirectionForward);
@@ -333,13 +331,6 @@ void handleTouch2() {
   }
 }
 
-/**
- * @brief Checks if a touch sensor is pressed.
- * 
- * @param touchPin The touch sensor pin.
- * @param threshold The touch threshold.
- * @return true if pressed, false otherwise.
- */
 bool isTouchPressed(uint8_t touchPin, uint16_t threshold) {
   uint16_t touchValue = touchRead(touchPin);
   // Uncomment the following line to debug touch values
@@ -350,20 +341,15 @@ bool isTouchPressed(uint8_t touchPin, uint16_t threshold) {
 // ============================
 // 🛠️ Motor Control Functions
 // ============================
-/**
- * @brief Initializes the PWM for motor control.
- */
 void initializeMotorPWM() {
-  ledcSetup(0, 5000, 8); // Channel 0, 5 kHz, 8-bit resolution
-  ledcAttachPin(MOTOR_ENABLE_PIN, 0);
+  // Attach the PWM channel to the MOTOR_ENABLE_PIN with specified frequency and resolution
+  if (!ledcAttachChannel(PWM_CHANNEL, PWM_FREQ, PWM_RESOLUTION, PWM_CHANNEL)) {
+    Serial.printf("Failed to attach LEDC channel %d to pin %d\n", PWM_CHANNEL, MOTOR_ENABLE_PIN);
+  } else {
+    Serial.printf("LEDC channel %d attached to pin %d with freq %d Hz and resolution %d bits\n", PWM_CHANNEL, MOTOR_ENABLE_PIN, PWM_FREQ, PWM_RESOLUTION);
+  }
 }
 
-/**
- * @brief Sets the motor speed and direction.
- * 
- * @param speed PWM value (0-255)
- * @param forward Direction: true for forward, false for reverse
- */
 void setMotorSpeed(uint8_t speed, bool forward) {
   if (speed > 255) speed = 255;
 
@@ -371,30 +357,27 @@ void setMotorSpeed(uint8_t speed, bool forward) {
   digitalWrite(MOTOR_REVERSE_PIN, forward ? LOW : HIGH);
 
   motorSpeed = speed;
-  ledcWrite(0, motorSpeed);
-
-  Serial.printf("Motor set to %s at speed %d\n", forward ? "FORWARD" : "REVERSE", motorSpeed);
+  if (!ledcWriteChannel(PWM_CHANNEL, motorSpeed)) {
+    Serial.printf("Failed to write PWM duty cycle %d to channel %d\n", motorSpeed, PWM_CHANNEL);
+  } else {
+    Serial.printf("Motor set to %s at speed %d\n", forward ? "FORWARD" : "REVERSE", motorSpeed);
+  }
 }
 
-/**
- * @brief Stops the motor.
- */
 void stopMotor() {
   digitalWrite(MOTOR_FORWARD_PIN, LOW);
   digitalWrite(MOTOR_REVERSE_PIN, LOW);
   motorSpeed = 0;
-  ledcWrite(0, 0);
-  Serial.println("Motor stopped");
+  if (!ledcWriteChannel(PWM_CHANNEL, 0)) {
+    Serial.printf("Failed to stop motor on channel %d\n", PWM_CHANNEL);
+  } else {
+    Serial.println("Motor stopped");
+  }
 }
 
 // ============================
 // 🛠️ Relay Control Function
 // ============================
-/**
- * @brief Toggles the relay state.
- * 
- * @param state true to turn ON, false to turn OFF
- */
 void toggleRelay(bool state) {
   digitalWrite(RELAY_PIN, state ? LOW : HIGH); // Active LOW
   Serial.println(state ? "Relay turned ON" : "Relay turned OFF");
@@ -403,18 +386,12 @@ void toggleRelay(bool state) {
 // ============================
 // 📤 State Publishing Functions
 // ============================
-/**
- * @brief Publishes the current relay state to MQTT.
- */
 void publishRelayState() {
   String state = (digitalRead(RELAY_PIN) == LOW) ? "ON" : "OFF";
   client.publish(relay_state_topic, state.c_str(), true); // Retain the state
   Serial.println("Published Relay State: " + state);
 }
 
-/**
- * @brief Publishes the current motor state to MQTT.
- */
 void publishMotorState() {
   String direction = motorDirectionForward ? "FORWARD" : "REVERSE";
   String state;
@@ -427,9 +404,6 @@ void publishMotorState() {
   Serial.println("Published Motor State: " + state);
 }
 
-/**
- * @brief Publishes the device ON/OFF state to MQTT.
- */
 void publishDeviceState() {
   String state = deviceOn ? "ON" : "OFF";
   client.publish(device_state_topic, state.c_str(), true); // Retain the state
