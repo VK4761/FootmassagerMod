@@ -23,8 +23,8 @@ const char* password = "your_WIFI_PASSWORD"; ///< Your Wi-Fi Password
 // ============================
 const char* mqtt_server   = "192.168.0.114"; ///< IP address of your MQTT broker (Home Assistant server)
 const int   mqtt_port     = 1883;            ///< Default MQTT port
-const char* mqtt_user     = "vk";            ///< MQTT username
-const char* mqtt_password = "Samsung989!@";  ///< MQTT password
+const char* mqtt_user     = "login";            ///< MQTT username
+const char* mqtt_password = "password";  ///< MQTT password
 
 // MQTT Topics
 const char* relay_command_topic = "home/relay/control";  ///< Topic to control the relay
