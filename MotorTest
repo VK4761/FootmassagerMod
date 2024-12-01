@@ -1,80 +1,176 @@
 // Define pins for motor driver and relay
-const int relayPin = 19;  // Relay IN4
-const int motorIn1 = 26;  // IN1
-const int motorIn2 = 25;  // IN2
-const int motorENA = 33;  // ENA (PWM)
+const int relayPin = 19;    // Relay IN4
+const int motorIn1 = 26;    // IN1
+const int motorIn2 = 25;    // IN2
+const int motorENA = 33;    // ENA (PWM)
 
-// Define time intervals
-const int totalTime = 10000; // Total run time in milliseconds
-const int halfTime = totalTime / 2; // Time to reach 75% speed
-
-
+// Define touch sensor pin
+const int touchPin = 4;      // Touch sensor connected to pin D4
 
 // Define duty cycles corresponding to desired speeds
-const int dutyCycle50 = 128;  // 50% of 255
-const int dutyCycle75 = 192;  // 75% of 255
-const int dutyCycle95 = 242;  // 95% of 255
+const int dutyCycle50 = 140;  // 50% of 255
+const int dutyCycle75 = 200;  // 75% of 255
+const int dutyCycle95 = 255;  // 95% of 255
 
-// Define duration for each speed phase in milliseconds
-const int duration = 10000;  // 10 seconds
+// Define MotorState
+volatile int MotorState = 0; // 0: Off, 1: 50%, 2: 75%, 3: 95%
+
+// Debounce settings
+unsigned long lastTouchTime = 0;
+const unsigned long debounceDelay = 200; // in milliseconds
+// Adjust the threshold and debounce parameters
+const int touchThreshold = 30;      // Adjust based on your environment
 
 
+// Timing for motor actions
+unsigned long previousMillis = 0;
+const unsigned long motorInterval = 10000; // 10 seconds
+
+// Function prototypes
+void setMotorSpeed(int dutyCycle);
+void updateMotor();
+void checkTouchSensor();
 
 /**
- * Sets the motor speed to a specified duty cycle for a given duration.
+ * Sets the motor speed by writing to the PWM channel.
  *
  * @param dutyCycle The PWM duty cycle to set (0-255).
- * @param duration The duration to maintain this speed in milliseconds.
  */
-void setMotorSpeed(int dutyCycle, int duration)
+void setMotorSpeed(int dutyCycle)
 {
     ledcWrite(motorENA, dutyCycle);
-    delay(duration);
 }
 
 /**
- * Sets up the GPIO pins
+ * Sets up the GPIO pins and initializes the motor and relay.
  */
 void setup()
 {
+    // Start Serial communication for debugging
+    Serial.begin(9600);
+
     // Configure pins as outputs
     pinMode(relayPin, OUTPUT);
     pinMode(motorIn1, OUTPUT);
     pinMode(motorIn2, OUTPUT);
+    
+    // Configure touch sensor pin as input with internal pull-up resistor
+    pinMode(touchPin, INPUT_PULLUP);
 
     // Initialize motor and relay in the off state
     digitalWrite(relayPin, LOW);
-
-
-    // Set motor direction (forward)
     digitalWrite(motorIn1, HIGH);
     digitalWrite(motorIn2, LOW);
-        // Turn on the relay to supply power to the motor driver
-    digitalWrite(relayPin, HIGH);
-
 
     // Attach PWM functionality to motorENA pin with specified frequency and resolution
-    ledcAttach(motorENA, 25000, 8);  // 5 kHz frequency, 8-bit resolution
+    ledcAttach(motorENA, 25000, 8);  // 25 kHz frequency, 8-bit resolution
+
+    // Ensure motor is off at startup
+    setMotorSpeed(0);
+
+    // Log initial state
+    Serial.println("Motor initialized. State: Off");
 }
 
 /**
- * Main loop to control the motor
+ * Updates the motor speed based on the current MotorState.
+ */
+void updateMotor()
+{
+    if (MotorState == 0)
+    {
+        // Motor off
+        setMotorSpeed(0);
+        digitalWrite(relayPin, LOW);
+        Serial.println("Motor State: Off");
+    }
+    else
+    {
+        // Motor on at specified speed
+        digitalWrite(relayPin, HIGH); // Turn relay on once
+        switch (MotorState)
+        {
+            case 1:
+                // 50% speed
+                setMotorSpeed(dutyCycle50);
+                Serial.println("Motor State: 50% Speed");
+                break;
+            case 2:
+                // 75% speed
+                setMotorSpeed(dutyCycle75);
+                Serial.println("Motor State: 75% Speed");
+                break;
+            case 3:
+                // 95% speed
+                setMotorSpeed(dutyCycle95);
+                Serial.println("Motor State: 95% Speed");
+                break;
+            default:
+                // Safety case to turn off the motor
+                setMotorSpeed(0);
+                digitalWrite(relayPin, LOW);
+                Serial.println("Motor State: Off (Error)");
+                MotorState = 0;
+                break;
+        }
+    }
+}
+
+/**
+ * Checks the touch sensor and updates the MotorState accordingly.
+ */
+void checkTouchSensor()
+{
+    // Read the touch sensor value
+    int touchValue = touchRead(touchPin);
+
+    // Debugging touch value
+
+    if (touchValue < touchThreshold)
+    {
+        unsigned long currentTime = millis();
+
+        // Check for debounce
+        if (currentTime - lastTouchTime > debounceDelay)
+        {
+            // Increment MotorState
+            MotorState = (MotorState + 1) % 4; // Cycles from 0 to 3
+            updateMotor();
+
+            // Debugging state change
+
+            Serial.print("Touch detected:");
+            Serial.println(touchValue);
+            Serial.print("Motor State updated to: ");
+            Serial.println(MotorState);
+
+            lastTouchTime = currentTime;
+        }
+        else
+        {
+            // Debugging debounce
+            Serial.println("Touch ignored due to debounce.");
+        }
+    }
+
+}
+/**
+ * Main loop to control the motor and handle touch sensor input.
  */
 void loop()
 {
+    unsigned long currentMillis = millis();
 
-    // Set motor speed to 50% for 10 seconds
-    setMotorSpeed(dutyCycle50, duration);
+    // Check touch sensor
+    checkTouchSensor();
 
-    // Set motor speed to 75% for 10 seconds
-    setMotorSpeed(dutyCycle75, duration);
+    // Handle motor interval actions if needed
+    if (currentMillis - previousMillis >= motorInterval)
+    {
+        previousMillis = currentMillis;
+        // Example: You can implement timed actions here if required
+        // Currently, motor speed is solely controlled by touch input
+    }
 
-    // Set motor speed to 95% for 10 seconds
-    setMotorSpeed(dutyCycle95, duration);
-
-    // Stop the motor by setting PWM duty cycle to 0
-    setMotorSpeed(0, duration);
-
-    // Wait for a while before restarting the cycle
-    delay(2000);
+    // Additional non-blocking tasks can be added here
 }
