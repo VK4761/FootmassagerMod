@@ -344,7 +344,7 @@ void updatePressure() {
 
         // Reset the cycle
         cycleActive = false;
-        Serial.println("Pressure system stopped. Device is OFF or PressureState is 0.");
+        // Serial.println("Pressure system stopped. Device is OFF or PressureState is 0.");
         return;
     }
 
