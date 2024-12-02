@@ -19,18 +19,22 @@ const int touchSystemPin = 15;    // Touch sensor connected to pin D15
 const int touchPressurePin = 14;  // Touch sensor connected to pin D14
 
 // Define duty cycles corresponding to desired speeds
-const int dutyCycle50 = 200;  // 50% of 255
-const int dutyCycle75 = 250;  // 75% of 255
-const int dutyCycle95 = 255;  // 95% of 255
+const int dutyCycle50 = 190;  // 50% of 255
+const int dutyCycle75 = 200;  // 75% of 255
+const int dutyCycle95 = 225;  // 95% of 255
 
 // Define duty cycles for the pump
 // Define thresholds for pressure modulation
-const int pressureLowMin = 160;
-const int pressureLowMax = 205;
-const int pressureMediumMin = 180;
-const int pressureMediumMax = 220;
-const int pressureHighMin = 200;
-const int pressureHighMax = 245;
+// const int pressureLowMin = 160;
+const int pressureLowMax = 230;
+const unsigned long lowTime = 7000; 
+// const int pressureMediumMin = 180;
+
+const int pressureMediumMax = 230;
+const unsigned long medTime = 12000;
+// const int pressureHighMin = 200;
+const int pressureHighMax = 250;
+const unsigned long  maxTime = 15000;
 
 // Modulation timing
 unsigned long lastModulationTime = 0;
@@ -62,6 +66,7 @@ const unsigned long motorInterval = 10000; // 10 seconds
 void setMotorSpeed(int dutyCycle);
 void setPumpSpeed(int dutyCycle);
 void updateMotor();
+void pressureCycleLoop( int maxDuty, unsigned long maximumTimeToPump);
 void updatePressure();
 void updateDeviceState();
 void checkTouchSensors();
@@ -73,6 +78,15 @@ struct TouchSensorConfig {
     void (*updateFunc)();             // Function to call when state changes
     unsigned long lastTouchTime;      // Last touch time for debounce
     bool lastTouchState;              // Previous touch state for edge detection
+};
+
+
+// Define Pressure Cycle States
+enum PressureCycleState {
+    BUILD_PRESSURE,
+    HOLD_PRESSURE,
+    RELEASE_PRESSURE,
+    IDLE
 };
 
 // Initialize sensors with individual debounce timing
@@ -237,59 +251,145 @@ void updateMotor() {
             break;
     }
 }
-
 /**
- * Updates the pump speed and solenoid valve based on the current PressureState.
+ * Handles the pressure cycling based on the current state.
+ *
+ * @param maxDuty The fixed duty cycle for the pump.
+ * @param maxTime The duration to hold the pressure in milliseconds.
  */
-void updatePressure() {
-    if (DeviceState == 0) {
-        // Device is OFF, ensure pump is off and valve is closed
-        setPumpSpeed(0);
-        digitalWrite(relayPumpPin, LOW);
-        digitalWrite(relaySolenoidPin, LOW);
-        Serial.println("Pressure State: Off (Device is OFF)");
-        return;
-    }
+void pressureCycleLoop(int maxDuty, unsigned long maxTime) {
+    // Define static variables to maintain state across function calls
+    static PressureCycleState currentState = BUILD_PRESSURE;
+    static unsigned long stateStartTime = 0;
 
-    switch (PressureState) {
-        case 0:
-            // Off mode
-            setPumpSpeed(0);
-            digitalWrite(relayPumpPin, LOW);
-            digitalWrite(relaySolenoidPin, LOW); // Close valve
-            Serial.println("Pressure State: Off");
+    unsigned long currentTime = millis();
+
+    switch (currentState) {
+        case BUILD_PRESSURE:
+            // Set pump to fixed maxDuty and turn it ON
+            setPumpSpeed(maxDuty);
+            digitalWrite(relayPumpPin, HIGH);        // Pump ON
+            digitalWrite(relaySolenoidPin, HIGH);    // Solenoid CLOSED
+
+            // Log buildup initiation
+            Serial.println("Pressure buildup initiated.");
+            currentState = HOLD_PRESSURE;
+            stateStartTime = currentTime;
+
+            // Log cycle start
+            Serial.print("Cycle Start - Duty Cycle: ");
+            Serial.println(maxDuty);
             break;
-        case 1:
-            // Low mode
-            setPumpSpeed(pumpDutyCycle50);
-            digitalWrite(relayPumpPin, HIGH);
-            digitalWrite(relaySolenoidPin, HIGH); // Open valve
-            Serial.println("Pressure State: Low");
+
+        case HOLD_PRESSURE:
+            // Wait for the specified hold duration
+            if (currentTime - stateStartTime >= maxTime) {
+                Serial.println("Hold time complete. Releasing pressure...");
+                currentState = RELEASE_PRESSURE;
+                stateStartTime = currentTime;
+
+                // Stop the pump and open solenoid to release pressure
+                setPumpSpeed(0);
+                digitalWrite(relayPumpPin, LOW);         // Pump OFF
+                digitalWrite(relaySolenoidPin, LOW);     // Solenoid OPEN
+
+                // Log release initiation
+                Serial.println("Pressure release initiated.");
+            }
             break;
-        case 2:
-            // Medium mode
-            setPumpSpeed(pumpDutyCycle75);
-            digitalWrite(relayPumpPin, HIGH);
-            digitalWrite(relaySolenoidPin, HIGH); // Open valve
-            Serial.println("Pressure State: Medium");
+
+        case RELEASE_PRESSURE:
+            // Wait for release duration (5 seconds)
+            if (currentTime - stateStartTime >= 5000) { // 5,000 ms = 5 seconds
+                Serial.println("Release complete.");
+
+                // Close solenoid after release
+                digitalWrite(relaySolenoidPin, HIGH);    // Solenoid CLOSED
+
+                // Reset for next cycle
+                currentState = BUILD_PRESSURE;
+                stateStartTime = currentTime;
+
+                // Log cycle reset
+                Serial.println("Cycle reset. Ready for next pressure buildup.");
+            }
             break;
-        case 3:
-            // High mode
-            setPumpSpeed(pumpDutyCycle95);
-            digitalWrite(relayPumpPin, HIGH);
-            digitalWrite(relaySolenoidPin, HIGH); // Open valve
-            Serial.println("Pressure State: High");
-            break;
+
+        case IDLE:
         default:
-            // Safety
+            // Ensure pump and solenoid are off
             setPumpSpeed(0);
-            digitalWrite(relayPumpPin, LOW);
-            digitalWrite(relaySolenoidPin, LOW);
-            Serial.println("Pressure State: Off (Error)");
-            PressureState = 0;
+            digitalWrite(relayPumpPin, LOW);          // Pump OFF
+            digitalWrite(relaySolenoidPin, LOW);      // Solenoid CLOSED
+            Serial.println("System is IDLE. Pump and Solenoid are OFF.");
             break;
     }
 }
+
+
+/**
+ * Updates the pump and solenoid based on the current PressureState.
+ */
+void updatePressure() {
+    static int lastPressureState = -1; // Track changes in PressureState
+    static unsigned long maxPumpTime = 0;
+    static bool cycleActive = false;
+
+    // Check if Device is OFF or PressureState is 0 (OFF)
+    if (DeviceState == 0 || PressureState == 0) {
+        // Turn off pump and solenoid
+        setPumpSpeed(0);
+        digitalWrite(relayPumpPin, LOW);          // Pump OFF
+        digitalWrite(relaySolenoidPin, LOW);      // Solenoid CLOSED
+
+        // Reset the cycle
+        cycleActive = false;
+        Serial.println("Pressure system stopped. Device is OFF or PressureState is 0.");
+        return;
+    }
+
+    // Detect changes in PressureState and adjust hold durations
+    if (PressureState != lastPressureState) {
+        switch (PressureState) {
+            case 1: // Low Pressure
+                maxPumpTime = lowTime;             // 7,000 ms
+                break;
+            case 2: // Medium Pressure
+                maxPumpTime = medTime;             // 12,000 ms
+                break;
+            case 3: // High Pressure
+                maxPumpTime = maxTime;             // 15,000 ms
+                break;
+            default:
+                // Invalid state, turn everything off
+                setPumpSpeed(0);
+                digitalWrite(relayPumpPin, LOW);          // Pump OFF
+                digitalWrite(relaySolenoidPin, LOW);      // Solenoid CLOSED
+                Serial.println("Pressure State: Invalid.");
+                return; // Exit the function
+        }
+
+        lastPressureState = PressureState; // Update state tracker
+        Serial.print("New PressureState: ");
+        Serial.println(PressureState);
+
+        // Reset the pressure cycle to initiate a new cycle
+        cycleActive = false;
+    }
+
+    // Start the pressure cycle if not active
+    if (!cycleActive) {
+        cycleActive = true;
+        // Since pump duty cycle is fixed, pass the fixed maxDuty
+        const int fixedMaxDuty = pressureHighMax; // Assuming 230 is the fixed duty cycle
+        pressureCycleLoop(fixedMaxDuty, maxPumpTime);
+    } else {
+        // Continue the pressure cycle
+        pressureCycleLoop(pressureHighMax, maxPumpTime);
+    }
+}
+
+
 
 /**
  * Generalized touch sensor check with per-sensor debounce and edge detection.
@@ -357,7 +457,8 @@ void loop() {
 
     // Check touch sensors
     checkTouchSensors();
-
+    // Update pressure system
+    updatePressure();
     // Handle motor interval actions if needed
     if (currentMillis - previousMillis >= motorInterval) {
         previousMillis = currentMillis;
