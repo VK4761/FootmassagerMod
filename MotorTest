@@ -4,23 +4,26 @@ const int motorIn1 = 26;    // IN1
 const int motorIn2 = 25;    // IN2
 const int motorENA = 33;    // ENA (PWM)
 
-// Define touch sensor pin
-const int touchPin = 4;      // Touch sensor connected to pin D4
+// Define touch sensor pins
+const int touchMotorPin = 4;      // Touch sensor connected to pin D4
+const int touchSystemPin = 15;    // Touch sensor connected to pin 15
 
 // Define duty cycles corresponding to desired speeds
-const int dutyCycle50 = 140;  // 50% of 255
-const int dutyCycle75 = 200;  // 75% of 255
+const int dutyCycle50 = 180;  // 50% of 255
+const int dutyCycle75 = 210;  // 75% of 255
 const int dutyCycle95 = 255;  // 95% of 255
 
 // Define MotorState
 volatile int MotorState = 0; // 0: Off, 1: 50%, 2: 75%, 3: 95%
 
-// Debounce settings
-unsigned long lastTouchTime = 0;
-const unsigned long debounceDelay = 200; // in milliseconds
-// Adjust the threshold and debounce parameters
-const int touchThreshold = 30;      // Adjust based on your environment
+// Define DeviceState
+volatile int DeviceState = 0; // 0: Off, 1: On
 
+// Debounce settings
+const unsigned long debounceDelay = 200; // in milliseconds
+
+// Touch threshold
+const int touchThreshold = 30;      // Adjust based on your environment
 
 // Timing for motor actions
 unsigned long previousMillis = 0;
@@ -29,23 +32,39 @@ const unsigned long motorInterval = 10000; // 10 seconds
 // Function prototypes
 void setMotorSpeed(int dutyCycle);
 void updateMotor();
-void checkTouchSensor();
+void updateDeviceState();
+void checkTouchSensors();
+
+// Structure for touch sensor configuration
+struct TouchSensorConfig {
+    int pin;                          // Pin number
+    volatile int *stateInt;           // Pointer to int state variable (for MotorState or DeviceState)
+    void (*updateFunc)();             // Function to call when state changes
+    unsigned long lastTouchTime;      // Last touch time for debounce
+    bool lastTouchState;              // Previous touch state for edge detection
+};
+
+// Initialize sensors with individual debounce timing
+TouchSensorConfig sensors[] = {
+    {touchMotorPin, &MotorState, updateMotor, 0, false},          // Motor sensor
+    {touchSystemPin, &DeviceState, updateDeviceState, 0, false}  // System sensor
+};
+
+const int numSensors = sizeof(sensors) / sizeof(sensors[0]);
 
 /**
  * Sets the motor speed by writing to the PWM channel.
  *
  * @param dutyCycle The PWM duty cycle to set (0-255).
  */
-void setMotorSpeed(int dutyCycle)
-{
+void setMotorSpeed(int dutyCycle) {
     ledcWrite(motorENA, dutyCycle);
 }
 
 /**
  * Sets up the GPIO pins and initializes the motor and relay.
  */
-void setup()
-{
+void setup() {
     // Start Serial communication for debugging
     Serial.begin(9600);
 
@@ -53,9 +72,10 @@ void setup()
     pinMode(relayPin, OUTPUT);
     pinMode(motorIn1, OUTPUT);
     pinMode(motorIn2, OUTPUT);
-    
-    // Configure touch sensor pin as input with internal pull-up resistor
-    pinMode(touchPin, INPUT_PULLUP);
+
+    // Configure touch sensor pins as inputs with internal pull-up resistors
+    pinMode(touchMotorPin, INPUT_PULLUP);
+    pinMode(touchSystemPin, INPUT_PULLUP);
 
     // Initialize motor and relay in the off state
     digitalWrite(relayPin, LOW);
@@ -63,6 +83,7 @@ void setup()
     digitalWrite(motorIn2, LOW);
 
     // Attach PWM functionality to motorENA pin with specified frequency and resolution
+    // Assuming ledcAttach() is correct as per the newer library
     ledcAttach(motorENA, 25000, 8);  // 25 kHz frequency, 8-bit resolution
 
     // Ensure motor is off at startup
@@ -70,26 +91,51 @@ void setup()
 
     // Log initial state
     Serial.println("Motor initialized. State: Off");
+    Serial.println("Device State: OFF");
+}
+
+/**
+ * Toggles the device state and updates the system accordingly.
+ */
+void updateDeviceState() {
+    if (DeviceState == 1) { // Turn the device ON
+        Serial.println("Device State: ON");
+
+        // Turn on the device
+        digitalWrite(relayPin, HIGH); // Example action: turn on relay
+
+        // Add additional logic for activating components, if needed
+    } else { // Turn the device OFF
+        Serial.println("Device State: OFF");
+
+        // Turn off the motor if running
+        if (MotorState != 0) {
+            MotorState = 0; // Reset MotorState
+            setMotorSpeed(0); // Stop the motor
+            digitalWrite(relayPin, LOW); // Turn off the relay
+            Serial.println("Motor turned off.");
+        }
+
+        // Ensure the device is fully turned off
+        digitalWrite(relayPin, LOW);
+
+        // Add any additional logic for deactivating components, if needed
+    }
 }
 
 /**
  * Updates the motor speed based on the current MotorState.
  */
-void updateMotor()
-{
-    if (MotorState == 0)
-    {
+void updateMotor() {
+    if (MotorState == 0) {
         // Motor off
         setMotorSpeed(0);
         digitalWrite(relayPin, LOW);
         Serial.println("Motor State: Off");
-    }
-    else
-    {
+    } else {
         // Motor on at specified speed
         digitalWrite(relayPin, HIGH); // Turn relay on once
-        switch (MotorState)
-        {
+        switch (MotorState) {
             case 1:
                 // 50% speed
                 setMotorSpeed(dutyCycle50);
@@ -117,56 +163,75 @@ void updateMotor()
 }
 
 /**
- * Checks the touch sensor and updates the MotorState accordingly.
+ * Generalized touch sensor check with per-sensor debounce and edge detection.
  */
-void checkTouchSensor()
-{
-    // Read the touch sensor value
-    int touchValue = touchRead(touchPin);
+void checkTouchSensors() {
+    unsigned long currentTime = millis();
 
-    // Debugging touch value
+    for (int i = 0; i < numSensors; ++i) {
+        // Read touch sensor value
+        int touchValue = touchRead(sensors[i].pin);
+        bool isTouched = touchValue < touchThreshold;
 
-    if (touchValue < touchThreshold)
-    {
-        unsigned long currentTime = millis();
+        // Debugging: Print touch value
+        // Serial.print("Touch read on pin ");
+        // Serial.print(sensors[i].pin);
+        // Serial.print(": ");
+        // Serial.println(touchValue);
 
-        // Check for debounce
-        if (currentTime - lastTouchTime > debounceDelay)
-        {
-            // Increment MotorState
-            MotorState = (MotorState + 1) % 4; // Cycles from 0 to 3
-            updateMotor();
+        // Edge detection: check if the touch state has changed
+        if (isTouched != sensors[i].lastTouchState) {
+            sensors[i].lastTouchState = isTouched;
+            if (isTouched) { // Touch started
+                if (currentTime - sensors[i].lastTouchTime > debounceDelay) {
+                    sensors[i].lastTouchTime = currentTime;
 
-            // Debugging state change
+                    if (sensors[i].stateInt != nullptr) {
+                        if (&DeviceState == sensors[i].stateInt) {
+                            // **Toggle DeviceState between 0 and 1**
+                            *sensors[i].stateInt = 1 - *sensors[i].stateInt;
+                        } else {
+                            // **Only allow if Device is ON**
+                            if (DeviceState == 1) { 
+                                // Increment MotorState with wrap-around
+                                *sensors[i].stateInt = (*sensors[i].stateInt + 1) % 4; // 0 to 3
+                            } else {
+                                Serial.println("Cannot change MotorState: Device is OFF");
+                            }
+                        }
+                    }
 
-            Serial.print("Touch detected:");
-            Serial.println(touchValue);
-            Serial.print("Motor State updated to: ");
-            Serial.println(MotorState);
+                    // Call update function if provided
+                    if (sensors[i].updateFunc) {
+                        sensors[i].updateFunc();
+                    }
 
-            lastTouchTime = currentTime;
-        }
-        else
-        {
-            // Debugging debounce
-            Serial.println("Touch ignored due to debounce.");
+                    // Debugging output
+                    Serial.print("Touch detected on pin ");
+                    Serial.print(sensors[i].pin);
+                    Serial.print(". Updated state: ");
+                    if (sensors[i].stateInt != nullptr && &DeviceState == sensors[i].stateInt) {
+                        Serial.println(*sensors[i].stateInt == 1 ? "1 (ON)" : "0 (OFF)");
+                    } else if (sensors[i].stateInt != nullptr) {
+                        Serial.println(*sensors[i].stateInt);
+                    }
+                }
+            }
         }
     }
-
 }
+
 /**
  * Main loop to control the motor and handle touch sensor input.
  */
-void loop()
-{
+void loop() {
     unsigned long currentMillis = millis();
 
-    // Check touch sensor
-    checkTouchSensor();
+    // Check touch sensors
+    checkTouchSensors();
 
     // Handle motor interval actions if needed
-    if (currentMillis - previousMillis >= motorInterval)
-    {
+    if (currentMillis - previousMillis >= motorInterval) {
         previousMillis = currentMillis;
         // Example: You can implement timed actions here if required
         // Currently, motor speed is solely controlled by touch input
