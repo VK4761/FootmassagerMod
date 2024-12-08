@@ -2,21 +2,23 @@
 const int relayMotorPin = 19;      // Relay IN4
 const int relaySolenoidPin = 21;   // Relay IN3 (Solenoid Valve)
 const int relayPumpPin = 22;       // Relay IN2 (Not used in this setup)
+const int relayHeatPin = 13;
 
 // L298N for Motor Driver
 const int motorIn1 = 26;    // IN1
 const int motorIn2 = 25;    // IN2
 const int motorENA = 33;    // ENA (PWM)
 
-// L298N for Pressure Pump
-const int pumpIn3 = 12;     // IN3
-const int pumpIn4 = 13;     // IN4
-const int pumpENB = 32;     // ENB (PWM)
+// // L298N for Pressure Pump
+// const int pumpIn3 = 12;     // IN3
+// const int pumpIn4 = 13;     // IN4
+// const int pumpENB = 32;     // ENB (PWM)
 
 // Define touch sensor pins
 const int touchMotorPin = 4;      // Touch sensor connected to pin D4
 const int touchSystemPin = 15;    // Touch sensor connected to pin D15
 const int touchPressurePin = 14;  // Touch sensor connected to pin D14
+const int touchHeatPin = 12; //Touch Sensor connected to pin D15
 
 // Define duty cycles corresponding to desired speeds
 const int dutyCycle50 = 190;  // 50% of 255
@@ -24,8 +26,6 @@ const int dutyCycle75 = 200;  // 75% of 255
 const int dutyCycle95 = 225;  // 95% of 255
 
 
-//Pressure Pump Var
-const int pressureHighMax = 250;
 // Define thresholds for pressure modulation
 const unsigned long lowTime = 7000; 
 const unsigned long medTime = 12000;
@@ -48,6 +48,11 @@ volatile int PressureState = 0; // 0: Off, 1: Low, 2: Medium, 3: High
 // Define DeviceState
 volatile int DeviceState = 0; // 0: Off, 1: On
 
+
+// Define HeatState
+volatile int HeatState = 0; // 0: Off, 1: On
+
+
 // Debounce settings
 const unsigned long debounceDelay = 200; // in milliseconds
 
@@ -60,9 +65,9 @@ const unsigned long motorInterval = 10000; // 10 seconds
 
 // Function prototypes
 void setMotorSpeed(int dutyCycle);
-void setPumpSpeed(int dutyCycle);
 void updateMotor();
-void pressureCycleLoop( int maxDuty, unsigned long maximumTimeToPump);
+void updateHeatState();
+void pressureCycleLoop(unsigned long maximumTimeToPump);
 void updatePressure();
 void updateDeviceState();
 void checkTouchSensors();
@@ -92,7 +97,8 @@ static unsigned long stateStartTime = 0;
 TouchSensorConfig sensors[] = {
     {touchMotorPin, &MotorState, updateMotor, 0, false},          // Motor sensor
     {touchSystemPin, &DeviceState, updateDeviceState, 0, false},  // System sensor
-    {touchPressurePin, &PressureState, updatePressure, 0, false}  // Pressure sensor
+    {touchPressurePin, &PressureState, updatePressure, 0, false},  // Pressure sensor
+    {touchHeatPin, &HeatState, updateHeatState, 0, false}         //Heat Sensor
 };
 
 const int numSensors = sizeof(sensors) / sizeof(sensors[0]);
@@ -111,9 +117,9 @@ void setMotorSpeed(int dutyCycle) {
  *
  * @param dutyCycle The PWM duty cycle to set (0-255).
  */
-void setPumpSpeed(int dutyCycle) {
-    ledcWrite(pumpENB, dutyCycle); // Channel 1 for pump
-}
+// void setPumpSpeed(int dutyCycle) {
+//     ledcWrite(pumpENB, dutyCycle); // Channel 1 for pump
+// }
 
 /**
  * Sets up the GPIO pins and initializes the motor, pump, and relays.
@@ -125,13 +131,14 @@ void setup() {
     // Configure pins as outputs
     pinMode(relayMotorPin, OUTPUT);
     pinMode(relaySolenoidPin, OUTPUT);
-    pinMode(relayPumpPin, OUTPUT); // If you plan to use it in the future
+    pinMode(relayPumpPin, OUTPUT); // 
+    pinMode(relayHeatPin, OUTPUT);
 
     pinMode(motorIn1, OUTPUT);
     pinMode(motorIn2, OUTPUT);
 
-    pinMode(pumpIn3, OUTPUT);
-    pinMode(pumpIn4, OUTPUT);
+    // pinMode(pumpIn3, OUTPUT);
+    // pinMode(pumpIn4, OUTPUT);
 
     // Configure touch sensor pins as inputs with internal pull-up resistors
     pinMode(touchMotorPin, INPUT_PULLUP);
@@ -140,29 +147,34 @@ void setup() {
 
     // Initialize motor and relays in the off state
     digitalWrite(relayMotorPin, LOW);
-    digitalWrite(relaySolenoidPin, LOW);
-    digitalWrite(relayPumpPin, HIGH); // Ensure pump relay is off if used
+    digitalWrite(relaySolenoidPin, HIGH);
+    digitalWrite(relayPumpPin, LOW); // Ensure pump relay is off if used
+    digitalWrite(relayHeatPin, LOW);
+
 
     digitalWrite(motorIn1, HIGH);
     digitalWrite(motorIn2, LOW);
 
-    digitalWrite(pumpIn3, HIGH);
-    digitalWrite(pumpIn4, LOW);
+    // digitalWrite(pumpIn3, HIGH);
+    // digitalWrite(pumpIn4, LOW);
 
     // Attach PWM functionality to motorENA pin with specified frequency and resolution
     // Using ledcAttach (as per your original setup)
     ledcAttach(motorENA, 25000, 8);  // Channel 0, 25 kHz frequency, 8-bit resolution
-    ledcAttach(pumpENB, 25000, 8);   // Channel 1, 25 kHz frequency, 8-bit resolution
+    // ledcAttach(pumpENB, 25000, 8);   // Channel 1, 25 kHz frequency, 8-bit resolution
 
     // Ensure motor and pump are off at startup
     setMotorSpeed(0);
-    setPumpSpeed(0);
 
     // Log initial state
     Serial.println("Motor initialized. State: Off");
     Serial.println("Pump initialized. State: Off");
     Serial.println("Device State: OFF");
 }
+
+
+
+
 
 /**
  * Toggles the device state and updates the system accordingly.
@@ -186,23 +198,41 @@ void updateDeviceState() {
             digitalWrite(relayMotorPin, LOW); // Turn off the relay
             Serial.println("Motor turned off.");
         }
+        PressureState = 0; // Reset PressureState
+        currentState = IDLE;
 
-        // Turn off the pump if running
-        if (PressureState != 0) {
-            PressureState = 0; // Reset PressureState
-            setPumpSpeed(0); // Stop the pump
-            digitalWrite(relaySolenoidPin, LOW); // Close the valve
-            Serial.println("Pressure turned off.");
-        }
-
+        digitalWrite(relayPumpPin, LOW); // Close the pump
+        digitalWrite(relaySolenoidPin, LOW); // Opens the Valve
+        
+        Serial.println("Pressure turned off.");
         // Ensure all relays are off
-        digitalWrite(relayMotorPin, LOW);
-        digitalWrite(relaySolenoidPin, LOW);
-        digitalWrite(relayPumpPin, LOW); // Ensure pump relay is off if used
+        if (HeatState != 0) {
+            HeatState = 0;
+            updateHeatState();
+        }
+        // currentState = IDLE;
 
         // Add any additional logic for deactivating components, if needed
     }
 }
+
+
+
+void updateHeatState()
+{
+  if(HeatState == 1)
+  {
+        Serial.println("Heat State: ON");
+        digitalWrite(relayHeatPin, HIGH); // Turn on heat relay
+  } 
+  else 
+  { 
+      Serial.println("Heat State: OFF");
+      digitalWrite(relayHeatPin, LOW); // Turn off heat relay
+  }
+}
+
+
 
 /**
  * Updates the motor speed based on the current MotorState.
@@ -256,17 +286,16 @@ void updateMotor() {
 /**
  * Handles the pressure cycling based on the current state.
  *
- * @param maxDuty The fixed duty cycle for the pump.
  * @param maxPumpTime The duration to hold the pressure in milliseconds.
  */
-void pressureCycleLoop(int maxDuty, unsigned long maxPumpTime) {
+void pressureCycleLoop(unsigned long maxPumpTime) {
     unsigned long currentTime = millis();
 
     switch (currentState) {
         case PUMP_ON:
             if (stateStartTime == 0) { // Just entered PUMP_ON
                 // Activate pump and close solenoid
-                setPumpSpeed(maxDuty);
+                // setPumpSpeed(maxDuty);
                 digitalWrite(relayPumpPin, HIGH);         // Pump ON
                 digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
 
@@ -286,7 +315,6 @@ void pressureCycleLoop(int maxDuty, unsigned long maxPumpTime) {
         case HOLD_PRESSURE:
             if (stateStartTime == 0) { // Just entered HOLD_PRESSURE
                 // Turn pump OFF, solenoid remains CLOSED
-                setPumpSpeed(0);                           // Pump OFF
                 digitalWrite(relayPumpPin, LOW);           // Pump OFF
                 digitalWrite(relaySolenoidPin, HIGH);      // Solenoid CLOSED
 
@@ -327,11 +355,10 @@ void pressureCycleLoop(int maxDuty, unsigned long maxPumpTime) {
         default:
             if (stateStartTime == 0) { // Just entered IDLE
                 // Ensure pump and solenoid are OFF
-                setPumpSpeed(0);
                 digitalWrite(relayPumpPin, LOW);          // Pump OFF
-                digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
+                digitalWrite(relaySolenoidPin, LOW);     // Solenoid CLOSED
 
-                Serial.println("IDLE: Pump is OFF, solenoid is CLOSED.");
+                Serial.println("IDLE: Pump is OFF, solenoid is OPEN.");
                 stateStartTime = currentTime;             // Record when IDLE started
             }
             break;
@@ -349,9 +376,8 @@ void updatePressure() {
     // Check if Device is OFF or PressureState is 0 (OFF)
     if (DeviceState == 0 || PressureState == 0) {
         // Turn off pump and close solenoid
-        setPumpSpeed(0);
         digitalWrite(relayPumpPin, LOW);          // Pump OFF
-        digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
+        digitalWrite(relaySolenoidPin, LOW);     // Solenoid CLOSED
 
         // Reset the cycle
         cycleActive = false;
@@ -378,7 +404,6 @@ void updatePressure() {
                 break;
             default:
                 // Invalid state, turn everything off
-                setPumpSpeed(0);
                 digitalWrite(relayPumpPin, LOW);          // Pump OFF
                 digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
                 currentState = IDLE;
@@ -398,18 +423,12 @@ void updatePressure() {
     if (!cycleActive) {
         cycleActive = true;
         // Use a fixed maxDuty (e.g., 230) as per your requirements
-        const int fixedMaxDuty = pressureHighMax; // Assuming 230 is the fixed duty cycle
-        pressureCycleLoop(fixedMaxDuty, maxPumpTime);
+        pressureCycleLoop(maxPumpTime);
     } else {
         // Continue the pressure cycle
-        pressureCycleLoop(pressureHighMax, maxPumpTime);
+        pressureCycleLoop(maxPumpTime);
     }
 }
-
-
-/**
- * Generalized touch sensor check with per-sensor debounce and edge detection.
- */
 void checkTouchSensors() {
     unsigned long currentTime = millis();
 
@@ -426,8 +445,8 @@ void checkTouchSensors() {
                     sensors[i].lastTouchTime = currentTime;
 
                     if (sensors[i].stateInt != nullptr) {
-                        if (sensors[i].stateInt == &DeviceState) {
-                            // Toggle DeviceState between 0 and 1
+                        if (sensors[i].stateInt == &DeviceState || sensors[i].stateInt == &HeatState) {
+                            // Toggle DeviceState and HeatState between 0 and 1
                             *sensors[i].stateInt = 1 - *sensors[i].stateInt;
                         } else {
                             // Only allow if Device is ON
@@ -454,7 +473,7 @@ void checkTouchSensors() {
                     Serial.print("Touch detected on pin ");
                     Serial.print(sensors[i].pin);
                     Serial.print(". Updated state: ");
-                    if (sensors[i].stateInt != nullptr && sensors[i].stateInt == &DeviceState) {
+                    if (sensors[i].stateInt != nullptr && (sensors[i].stateInt == &DeviceState || sensors[i].stateInt == &HeatState)) {
                         Serial.println(*sensors[i].stateInt == 1 ? "1 (ON)" : "0 (OFF)");
                     } else if (sensors[i].stateInt != nullptr) {
                         Serial.println(*sensors[i].stateInt);
@@ -465,6 +484,7 @@ void checkTouchSensors() {
     }
 }
 
+
 /**
  * Main loop to control the motor, pump, and handle touch sensor input.
  */
@@ -474,6 +494,7 @@ void loop() {
     // Check touch sensors
     checkTouchSensors();
     // Update pressure system
+    
     updatePressure();
     // Handle motor interval actions if needed
     if (currentMillis - previousMillis >= motorInterval) {
