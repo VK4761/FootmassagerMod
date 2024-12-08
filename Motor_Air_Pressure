@@ -1,7 +1,7 @@
 // Relay Pins
 const int relayMotorPin = 19;      // Relay IN4
-const int relaySolenoidPin = 21;   // Relay IN3 (Solenoid Valve)
-const int relayPumpPin = 22;       // Relay IN2 (Not used in this setup)
+const int relaySolenoidPin = 22;   // Relay IN3 (Solenoid Valve)
+const int relayPumpPin = 21;       // Relay IN2 (Not used in this setup)
 const int relayHeatPin = 13;
 
 // L298N for Motor Driver
@@ -38,6 +38,7 @@ const unsigned long modulationDelay = 50; // Adjust as needed for smooth oscilla
 int modulationDirection = 1;  // 1 for increasing, -1 for decreasing
 int currentPumpSpeed = 0;     // Holds the current speed
 
+const unsigned long holdDuration = 8000; // 5 seconds hold time
 
 // Define MotorState
 volatile int MotorState = 0; // 0: Off, 1: 50%, 2: 75%, 3: 95%
@@ -311,52 +312,53 @@ void pressureCycleLoop(unsigned long maxPumpTime) {
                 Serial.println("PUMP_ON: Max pump time elapsed. Transitioning to HOLD_PRESSURE.");
             }
             break;
-
         case HOLD_PRESSURE:
-            if (stateStartTime == 0) { // Just entered HOLD_PRESSURE
-                // Turn pump OFF, solenoid remains CLOSED
+        {
+            if (stateStartTime == 0) 
+            {
                 digitalWrite(relayPumpPin, LOW);           // Pump OFF
-                digitalWrite(relaySolenoidPin, HIGH);      // Solenoid CLOSED
-
-                Serial.println("HOLD_PRESSURE: Pump turned OFF, solenoid remains closed.");
-                stateStartTime = currentTime;              // Record when HOLD_PRESSURE started
+                // digitalWrite(relaySolenoidPin, HIGH);      // Keep solenoid CLOSED (same as PUMP_ON)
+                Serial.println("HOLD_PRESSURE: Pump OFF, solenoid CLOSED.");
+                stateStartTime = currentTime;              // Start hold timer
             }
 
-            // Check if maxPumpTime has elapsed
-            if (currentTime - stateStartTime >= maxPumpTime) {
-                // Transition to RELEASE_PRESSURE
+            // Check hold time using holdDuration or whichever variable you're using for hold time
+            if (currentTime - stateStartTime >= holdDuration) 
+            {
                 currentState = RELEASE_PRESSURE;
-                stateStartTime = 0; // Reset for next state
-                Serial.println("HOLD_PRESSURE: Max hold time elapsed. Transitioning to RELEASE_PRESSURE.");
+                stateStartTime = 0;
+                Serial.println("HOLD_PRESSURE: Hold time elapsed, moving to RELEASE_PRESSURE.");
             }
-            break;
+        }
+        break;
 
         case RELEASE_PRESSURE:
-            if (stateStartTime == 0) { // Just entered RELEASE_PRESSURE
-                // Open solenoid to release pressure
-                digitalWrite(relaySolenoidPin, LOW);      // Solenoid OPEN
-                Serial.println("RELEASE_PRESSURE: Solenoid opened to release pressure.");
-                stateStartTime = currentTime;             // Record when RELEASE_PRESSURE started
+        {
+            if (stateStartTime == 0) 
+            {
+                digitalWrite(relayPumpPin, LOW);        
+                digitalWrite(relaySolenoidPin, LOW);     // Solenoid OPEN to release pressure
+                Serial.println("RELEASE_PRESSURE: Solenoid OPEN, releasing pressure.");
+                stateStartTime = currentTime;
             }
 
-            // Check if 5 seconds have elapsed
-            if (currentTime - stateStartTime >= 5000) { // 5,000 ms = 5 seconds
-                // Close solenoid after releasing pressure
-                digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
-                Serial.println("RELEASE_PRESSURE: Solenoid closed. Cycle complete.");
-
-                // Reset for the next cycle
-                currentState = PUMP_ON;
-                stateStartTime = 0; // Reset for next state
+            // Change release time to 8 seconds (8000 ms)
+            if (currentTime - stateStartTime >= 8000) 
+            {
+                digitalWrite(relaySolenoidPin, LOW);    // After release, close solenoid if required or go back to idle
+                Serial.println("RELEASE_PRESSURE: 8 seconds elapsed, solenoid CLOSED. Cycle complete.");
+                currentState = PUMP_ON; 
+                stateStartTime = 0;
             }
-            break;
+        }
+        break;
 
         case IDLE:
         default:
             if (stateStartTime == 0) { // Just entered IDLE
                 // Ensure pump and solenoid are OFF
                 digitalWrite(relayPumpPin, LOW);          // Pump OFF
-                digitalWrite(relaySolenoidPin, LOW);     // Solenoid CLOSED
+                digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
 
                 Serial.println("IDLE: Pump is OFF, solenoid is OPEN.");
                 stateStartTime = currentTime;             // Record when IDLE started
@@ -377,7 +379,7 @@ void updatePressure() {
     if (DeviceState == 0 || PressureState == 0) {
         // Turn off pump and close solenoid
         digitalWrite(relayPumpPin, LOW);          // Pump OFF
-        digitalWrite(relaySolenoidPin, LOW);     // Solenoid CLOSED
+        digitalWrite(relaySolenoidPin, LOW);     // Solenoid OPEN
 
         // Reset the cycle
         cycleActive = false;
@@ -405,7 +407,7 @@ void updatePressure() {
             default:
                 // Invalid state, turn everything off
                 digitalWrite(relayPumpPin, LOW);          // Pump OFF
-                digitalWrite(relaySolenoidPin, HIGH);     // Solenoid CLOSED
+                digitalWrite(relaySolenoidPin, LOW);     // Solenoid OPEN
                 currentState = IDLE;
                 stateStartTime = 0;
                 Serial.println("updatePressure: Pressure State Invalid. System turned OFF.");
